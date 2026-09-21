@@ -1,0 +1,117 @@
+# OrthoGen — run results (for cross-run comparison)
+
+Test set: `subset_test` = 60 captures (90×90 m block), all 5 bands, all RTK-fixed.
+Engine: bundled ODX (native WebODM, Dockerless), CPU-only (no NVIDIA GPU), 16 cores.
+Runs 1–3 on **ODX 3.7.4**; run 4 on **ODX 3.8.3** (WebODM Desktop upgraded in place).
+Full per-run detail is in each run's `orthogen_run.json` + `odm_report/stats.json`
+under `%USERPROFILE%\OrthoGen_work\<run>`.
+
+| # | Run | Bands used for geometry | Key settings | Time | Imgs recon. | Feat/img | Sparse pts | Reproj. err (px) | Georef residual (avg / y-std) |
+|---|-----|------------------------|--------------|------|-------------|----------|-----------|------------------|-------------------------------|
+| 1 | `baseline` | ODM auto (MS band, 1296 px) | radiometric=camera+sun, ortho/dem-res=2.6, pc=high, feat=high, gps-acc=0.1 | 39.2 min | 59/60 | 1963 | 4,822 | 0.351 | 0.81 m avg / 1.77 m std |
+| 2 | `rgb_sfm_medium` | RGB only (1320 px) | feat=medium, pc=low, fast-orthophoto, ortho-res=1.3, gps-acc=0.1 | 5.7 min | **60/60** | 1444 | **14,157** | **0.109** | **0.012 m avg / 0.01 m std** |
+| 3 | `ms_sfm_nir_high` | 4 MS bands, **NIR** primary (1296 px) | feat=high, primary-band=NIR, pc=low, fast-orthophoto, ortho-res=1.3, gps-acc=0.1 | 58.5 min | 60/60 | 3749 | 10,876 | 0.375 | 0.67 m avg / 0.49 m y-std (z-std 1.46 m) — **DEGENERATE** |
+| 4 | `ms_sfm_nir_383_gsd` | 4 MS bands, **NIR** primary (1296 px), **ODX 3.8.3** | feat=high, primary-band=NIR, pc=low, fast-orthophoto, ortho/dem-res=2.6, gps-acc=0.1 | 27.8 min | **60/60** | 3749 | **35,458** | **0.146** | **0.42 m avg / 0.40 m y-std (z-std 0.05 m)** ✓ sound |
+
+> **⚠ Correction (post-hoc diagnosis).** Runs #1 and #3 (the MS-driven runs) did
+> **not** produce valid 3D reconstructions. Their sparse point clouds are degenerate —
+> Z scattered from ~−1.2e9 to +7.7e5 m (RGB's sit in a clean ~2 m slab at field
+> elevation). ODM's absurd MS "GSD" of ~62 cm/px (true optical GSD is ~2.4 cm/px) is a
+> *symptom*: GSD = camera-height-above-points ÷ focal, and the points are junk. The
+> cameras still landed at correct RTK positions **only because `gps-accuracy=0.1` pins
+> them regardless of geometry** — so the georef residuals in the table for #1/#3 measure
+> the **GPS prior, not reconstruction quality**. Root cause: MS bands downsampled to
+> 1296 px (`high`) or less don't yield enough reliable matches on low-texture ag imagery.
+> Prior successful M3M-MS runs were on **ultra** (2592 px). Judge MS runs by point-cloud
+> Z sanity + inlier reprojection, NOT georef residual. Only run #2 (RGB) is sound **on ODX 3.7.4**.
+>
+> **Resolved in run #4 (ODX 3.8.3).** The MS failure was an **engine limitation, not the
+> sensor**. Feature *detection* was identical across engines (3749/img); 3.8.3's
+> `bundle_outlier_filtering_type: AUTO` + `triangulation_type: ROBUST` rejected the bad MS
+> matches that 3.7.4 passed through to poison triangulation. On 3.8.3 the same NIR-MS run
+> produces a **sound reconstruction**: points in a 1.4 m slab at field elevation, implied
+> GSD 2.45 cm/px (matches optical), z-std 1.46 m → **0.05 m**, 3.3× the points, real 298 MB
+> ortho. The earlier "partly inherent to the sensor" framing was too pessimistic — the
+> newer engine's outlier filtering was the missing piece. (`--gsd` is still not a flag in
+> 3.8.3; run 4 "specified GSD" via `--orthophoto-resolution/--dem-resolution 2.6`.)
+>
+> **Band co-registration (run #4 ortho, phase-correlation on 86 textured tiles vs NIR
+> primary):** all bands sub-pixel — RedEdge median **0.05 px** (0.14 cm), Green 0.16 px
+> (0.41 cm), Red 0.30 px (0.78 cm; slightly higher likely radiometric, not geometric).
+> ODM's per-capture ECC warp fully corrects even RedEdge's 27 px physical lens offset.
+> **Verdict: native MS ortho is analysis-ready for NDVI/NDRE — Architecture B (RGB-pose
+> propagation) is NOT needed for band co-registration.** Caveats for a production run:
+> (1) run #4 used `radiometric-calibration=none` (raw DN, not reflectance) — set
+> `camera+sun` for real index work; (2) absolute georef is ~0.4 m (vs RGB's ~0.01 m) —
+> fine for single-date zone mapping; revisit if multi-temporal stacking needs tighter.
+>
+> **RGB↔MS cross-sensor alignment (why one combined stack needs Architecture B).**
+> (1) The RGB ortho (run #2) and MS ortho (run #4) are independent solves + separate DSMs;
+> measured offset between them = **median 20 cm, 90th pct 38 cm, max 1.1 m**, systematic
+> shift only ~3 cm → spatially-varying/relief-driven, NOT a global shift a 2D registration
+> could remove. (2) Ingestion test on **ODX 3.8.3 with `--primary-band RGB` forced**: engine
+> STILL trims RGB (`Skipping RGB band (60 images)`) and reconstructs from a single MS band
+> (fell through to Red, 2592×1944 camera) — verified via `image_list.txt`/`camera_models.json`,
+> not the misleading "will use ... from rgb band" log line. So ODM cannot co-process RGB+MS
+> in one run even on 3.8.3. **Conclusion: an aligned RGB+MS stack requires custom shared-
+> extrinsics + common-DSM orthorectification (Architecture B); it cannot be coerced from ODM.**
+
+## Notes
+
+**Run 1 — baseline (stock ODM, all 5 bands).** Reference/control. Reconstruction
+succeeds with excellent sub-pixel reprojection error (0.351 px), but only ~1963
+features/image and 4822 sparse points because geometry is driven by a **5 MP MS
+band downsized to 1296 px**. The georeferencing residual std (~1.8 m in Y) is far
+larger than the RTK precision (~1–2 cm) — i.e. the reconstruction *geometry*, not
+the GPS, is the limiting factor. This is exactly the weakness Architecture B
+targets: driving SfM from the 20 MP RGB should sharply increase features/points
+and tighten geometry, which should also improve band co-registration.
+
+**Run 2 — RGB-only SfM (Architecture B, step 1).** Drives geometry from the 20 MP
+RGB at `feature-quality medium` (1320 px ≈ the baseline's 1296 px). Result validates
+the whole premise:
+- **Georef residual collapsed from ~1.8 m std to ~0.01 m** — now consistent with the
+  RTK precision. The reconstruction is finally as accurate as the GPS.
+- **60/60 images reconstructed** (vs 59/60), **~3× the sparse tie points** (14,157 vs
+  4,822), and **~3× lower reprojection error** (0.109 vs 0.351 px).
+- Finished in 5.7 min (post-SfM stages turned down: pc=low + fast-orthophoto).
+
+Surprise worth noting: RGB detected *fewer* raw features/image (1444 vs 1963) — the
+field is fairly low-texture at 1320 px. So the win was **not** raw feature count; it
+was **match quality + higher overlap**: RGB keypoints match far more reliably across
+views, yielding many more valid tracks and a geometrically consistent, RTK-tight
+reconstruction. Feature *density* was a red herring; feature *matchability* + overlap
+were the real levers.
+
+Next: since medium already nails cm-level georef, `feature-quality high` (2640 px) is
+optional headroom (denser tracks), not a necessity. The open work is band-pose
+propagation + DSM-based orthorectification (Architecture B, steps 2–3).
+
+**Ingestion check (before run 3).** Inspected run 1's `opensfm/image_list.txt` +
+`cameras.json` + console log. Confirmed: ODM **trims the RGB band** when it's mixed
+with single-band MS (`[WARNING] Skipping RGB band (60 images)`), so SfM ran on 60
+`_MS_G.TIF` at the 2592×1944 MS camera — the 20 MP RGB never entered geometry.
+`primary_band: auto` selected **Green**; Red/NIR/RedEdge were 2D-warped onto Green.
+Implication: ODM's native `--primary-band=RGB` path is **closed** on this dataset —
+RGB geometry must come from a RGB-only run (run 2) + our own pose propagation.
+
+**Run 3 — MS-only, NIR primary (band-choice + input-content control).** Four MS bands,
+no RGB (avoids the trim), `feature-quality high` = 1296 px ≈ run 2's 1320 px, post-SfM
+matched to run 2. Only variables vs baseline: primary band (Green→NIR) + turned-down
+post-SfM. Two findings:
+- **Band choice matters.** NIR primary ~doubled features/img (3749 vs 1963), got 60/60
+  images (vs 59/60), 2.3× the points (10,876 vs 4,822), and tightened georef y-std 3.6×
+  (1.77 → 0.49 m). NIR's canopy/soil contrast is far richer than Green on this vegetated
+  field — Green was a poor auto-pick.
+- **But the sensor is the ceiling.** Even the best MS band sits at ~0.5 m y-std (z-std
+  1.46 m) — still ~50× looser than RGB's 0.01 m. At equal ~1300 px feature resolution,
+  20 MP RGB beats 5 MP MS on *content*, and no band/quality knob closes the gap.
+- Cost: NIR's feature richness made matching expensive — 58.5 min despite low pc + fast
+  ortho (matching is ~O(n²) in features).
+
+**Verdict for Test C.** Both native shortcuts are ruled out (RGB trimmed; MS self-SfM
+caps at ~0.5 m). RGB-driven geometry (run 2) is the only cm-level source, so band
+registration must be **RGB-pose propagation + DSM orthorectification (our code)**, not
+an ODM MS re-run.
+
+Compare subsequent runs against these rows (same subset).

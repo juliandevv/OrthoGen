@@ -1,0 +1,26 @@
+# --- Datasets: raw DJI M3M imagery (large, not versioned) ---
+/DJI_202609091043_001_Corteva/
+/subset_test/
+# any other DJI capture folder dropped in the project root
+/DJI_*/
+# raw imagery anywhere in the tree
+*.JPG
+*.jpg
+*.TIF
+*.tif
+*.tiff
+*.DNG
+*.dng
+# ingest artifacts written alongside datasets
+captures.csv
+captures.json
+
+# --- ODM run products (WORK_DIR is off-tree, but just in case) ---
+*.log
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
