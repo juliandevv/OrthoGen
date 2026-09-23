@@ -220,3 +220,45 @@ registration must be **RGB-pose propagation + DSM orthorectification (our code)*
 an ODM MS re-run.
 
 Compare subsequent runs against these rows (same subset).
+
+---
+
+## Cross-band RGB↔MS matching study (feature matching vs ECC)
+
+Goal: improve per-capture band placement beyond the ECC step (`rig.refine_alignment`).
+Residuals below are tiled gradient phase-correlation medians in the RGB pixel frame.
+Visual report + inspection tool: `tools/inspect_pair.py`; artifact "Cross-Band Co-Registration".
+
+**ECC is not reliably ~1 px — it fails often on low-contrast bands.** 12-capture sweep,
+median residual and failure count (>5 px):
+
+| Band | ECC med | ECC fails | Spectral SIFT | inliers | fails | Gray SIFT | inliers |
+|---|---|---|---|---|---|---|---|
+| Green | 1.10 | **3/12** | 1.02 | 934 | 0 | 1.00 | 816 |
+| Red | 0.94 | 0 | 0.92 | 447 | 0 | 0.93 | 354 |
+| RedEdge | 53.2 | **7/12** | 0.95 | 100 | 0 | 0.90 | 158 |
+| NIR | 1.02 | 0 | 2.00 | 8 | **4/12** | 1.17 | 18 |
+
+**Method that works (Idea A):** warp RGB into each MS band's native grid (equal
+resolution/blur), reduce RGB to the spectrally-matched Bayer channel (G↔Green, R↔Red;
+blue dropped — no MS overlap), CLAHE, SIFT, fit `MS_undist→RGB` directly from matches.
+Sub-pixel with 0 failures on Green/Red/RedEdge. **Spectral channel helps overlap bands
+(G/R) but grayscale is better for RedEdge/NIR** (grayscale is 59% green → carries canopy
+structure the red channel lacks beyond RGB's range).
+
+**NIR is the weak band for direct matching** (≤18 inliers, 33% failure). Fixed by the
+**stack anchor (Idea B):** register R/RE/NIR into Green's grid (MS↔MS, same sensor,
+100s of inliers), anchor Green→RGB once via the green channel, compose
+`band→RGB = H_green→RGB ∘ H_band→green`. 8-capture medians: Green 1.02, Red 0.85,
+RedEdge 0.95, **NIR 0.95 px (0/8 fail)**. Pooling all four bands' features into the
+anchor ties Green-only — pooling not required; the value is the architecture.
+
+**Detectors (NIR direct match):** dense detectors beat SIFT — AKAZE 128 inliers/0.95 px,
+BRISK 73/0.96, KAZE 79/1.06, SIFT 13/1.00 (thin), **ORB fails** (4 inliers/27.7 px).
+**CLAHE** lifts inlier counts ~37% (RedEdge SIFT 57→78). **SURF unavailable** (not in this
+OpenCV build; still patented) — SIFT (free since 2020) is the right default.
+
+**Recommendation:** replace per-band ECC with the stack anchor (SIFT/CLAHE Green anchor,
+AKAZE fallback when thin, ECC as last resort); expected per-capture residual ~1 px
+(~1.3 cm) flat vs ECC's variable 1–56 px. Then wire into `prewarp.py` and re-run the
+60-cap ortho. **Not yet wired into the pipeline** — study/tooling only.
