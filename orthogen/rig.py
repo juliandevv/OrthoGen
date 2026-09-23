@@ -80,19 +80,27 @@ def _grad(a: np.ndarray) -> np.ndarray:
 
 def refine_alignment(rgb: BandImage, ms: BandImage,
                      motion: int = cv2.MOTION_HOMOGRAPHY,
-                     work_px: int = 1600) -> tuple:
+                     work_px: int = 1600,
+                     rgbu: Optional[np.ndarray] = None) -> tuple:
     """Refine the factory DewarpHMatrix with ECC, mirroring ODM's band alignment
     (gradient-of-gaussian images, cross-band robust). The factory H handles the 1.7x
     RGB/MS scale + gross offset (putting us in ECC's basin); ECC removes the residual.
 
+    ``rgbu`` may be a pre-undistorted RGB grayscale image (from ``undistort``); when
+    given, the 20 MP RGB read+undistort is skipped (batch pre-warp undistorts the RGB
+    once per capture and reuses it across all four MS bands).
+
     Returns (refined_H, qa) where refined_H maps undistorted-MS pixels -> RGB frame.
     """
-    rgb_img = _read_gray(rgb.path)
     ms_img = _read_gray(ms.path)
-    rh, rw = rgb_img.shape
     H0 = ms_to_rgb_H(ms)
     msu = undistort(ms_img, parse_dewarp(ms, (ms_img.shape[1], ms_img.shape[0])))
-    rgbu = undistort(rgb_img, parse_dewarp(rgb, (rw, rh)))
+    if rgbu is None:
+        rgb_img = _read_gray(rgb.path)
+        rh, rw = rgb_img.shape
+        rgbu = undistort(rgb_img, parse_dewarp(rgb, (rw, rh)))
+    else:
+        rh, rw = rgbu.shape
     ms0 = warp_ms_to_rgb(msu, H0, (rw, rh))
     mask = ms0 > 0
 
