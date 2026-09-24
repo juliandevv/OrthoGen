@@ -261,4 +261,42 @@ OpenCV build; still patented) — SIFT (free since 2020) is the right default.
 **Recommendation:** replace per-band ECC with the stack anchor (SIFT/CLAHE Green anchor,
 AKAZE fallback when thin, ECC as last resort); expected per-capture residual ~1 px
 (~1.3 cm) flat vs ECC's variable 1–56 px. Then wire into `prewarp.py` and re-run the
-60-cap ortho. **Not yet wired into the pipeline** — study/tooling only.
+60-cap ortho.
+
+### DECISIVE 60-cap ortho test — feature vs ECC prewarp (wired: `--align feature|ecc`)
+
+Wired the stack anchor into `prewarp.py` (`rig.feature_align_stack`, default `--align
+feature`, per-band ECC fallback). Ran the full 60-cap `combined-sfm --prewarp` both ways;
+measured band co-registration on the ortho with `scratchpad/measure_align.py` (GSD 1.30).
+
+| Band | ECC med | FEAT med | ECC p90 | FEAT p90 |
+|---|---|---|---|---|
+| Red | 5.6 | 6.1 | 7.7 | 12.5 |
+| Green | 5.9 | 6.2 | 8.3 | 12.9 |
+| NIR | 5.6 | 6.0 | 8.7 | 12.5 |
+| RedEdge | 5.7 | 6.1 | 8.1 | 12.4 |
+
+Geometry identical (both 60/60 shots, reproj 0.109/0.111, georef 0.111 m) — SfM is driven
+by the shared RGB/Pan, unaffected by MS placement. Scale deviation (Green): ECC 26 ppm vs
+**FEAT 284 ppm**. Radial breakdown: feature is uniformly ~0.5 cm worse at every radius (not
+an edge/extent artifact).
+
+**Result: feature does NOT beat ECC on the ODM ortho — median ≈ equal (both ~6 cm), feature
+slightly worse on p90 and 10× more scale variance.** Why:
+- **The ortho is floor-limited (~6 cm), not registration-limited.** ECC's residual is a
+  uniform ~5.7 cm across ALL bands, including the ones ECC placed at ~1 px AND the ones it
+  failed on 25–58% of captures. So the floor is MS optics (~2.6 cm GSD resampled to 1.3 cm)
+  + ODM's mosaic blend averaging over redundant overlap — per-capture homography quality
+  barely moves it.
+- **Feature's independently-fit homographies add between-capture variance.** ECC warm-starts
+  from the factory DewarpHMatrix and stays near it → mutually-consistent per-capture Hs.
+  SIFT+RANSAC fits each capture freely → accurate per-capture (~1 px) but more scale/projective
+  jitter capture-to-capture → slightly worse mosaic consistency (p90, scale_dev). Confirmed
+  on Green, which uses the bare anchor (no MS↔MS composition) and is still worse than ECC.
+
+**Takeaway:** the per-capture robustness (fixing RedEdge/Green ECC failures) is real and
+matters for single-capture products, but does NOT propagate through ODM's mosaic. To exploit
+it we'd need our OWN per-capture orthorectification (bypass ODM's blend), or constrain the
+feature fit to fewer DOF (affine/similarity, regularized toward factory H) to cut the
+between-capture variance. For the ODM ortho path, **ECC prewarp remains marginally better +
+cheaper** — keep it the default; `--align feature` stays available for robustness.

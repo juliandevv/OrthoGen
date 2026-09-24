@@ -279,16 +279,17 @@ def cmd_combined_sfm(args):
     prewarp = args.prewarp
     work_px = args.work_px
     workers = args.prewarp_workers
+    align = args.align
 
     def stager(ds, project_dir):
         complete = [c for c in ds.captures if not c.missing_bands]
         if limit:
             complete = complete[:limit]
         if prewarp:
-            print(f"Staging {len(complete)} captures: RGB (disguised) + ECC-prewarped "
+            print(f"Staging {len(complete)} captures: RGB (disguised) + {align}-prewarped "
                   f"MS carriers (work_px={work_px}, workers={workers or 'auto'})")
             return odm_runner.stage_combined_prewarp(complete, project_dir,
-                                                     work_px=work_px, workers=workers)
+                                                     work_px=work_px, workers=workers, align=align)
         rgb = [c.bands["RGB"].path for c in complete if c.bands.get("RGB")]
         ms = [c.bands[b].path for c in complete for b in config.MS_BANDS
               if c.bands.get(b)]
@@ -358,10 +359,13 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--skip-band-alignment", action="store_true",
                    help="skip ODM's band alignment (requires MS pre-warped into the RGB frame)")
     c.add_argument("--prewarp", action="store_true",
-                   help="ECC-prewarp MS into the RGB frame (rig.py) and feed as carriers; "
+                   help="prewarp MS into the RGB frame (rig.py) and feed as carriers; "
                         "implies --skip-band-alignment")
+    c.add_argument("--align", choices=["feature", "ecc"], default="feature",
+                   help="--prewarp placement: 'feature' SIFT stack anchor (default, robust "
+                        "sub-px, ECC fallback) or 'ecc' per-band ECC (prior method)")
     c.add_argument("--work-px", type=int, default=900,
-                   help="ECC working resolution for --prewarp (default 900)")
+                   help="ECC working resolution for --prewarp --align ecc (default 900)")
     c.add_argument("--prewarp-workers", type=int, default=None,
                    help="parallel workers for --prewarp staging (default min(8, cpu))")
     c.add_argument("--dry-run", action="store_true")

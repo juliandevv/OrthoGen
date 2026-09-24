@@ -61,27 +61,43 @@ def _redistort_map(refined_H, rgb_intr, ms_intr, rw, rh, step: int = 8):
     return mapx, mapy
 
 
-def warp_bands(capture, work_px: int = 900, frame: str = "raw"):
+def warp_bands(capture, work_px: int = 900, frame: str = "raw", align: str = "feature"):
     """Yield ``(band, warped_uint16, qa)`` for each MS band of a capture, placed into
-    the RGB frame. The 20 MP RGB is read + undistorted ONCE (for ECC) and reused.
+    the RGB frame. The 20 MP RGB is read + undistorted ONCE and reused.
 
-    ``frame="raw"`` (default) writes into the RAW/distorted RGB grid so ODM's own
-    undistort is correct for the carrier (matches how it treats the RGB) — required for
-    the --skip-band-alignment ortho. ``frame="undist"`` writes the undistorted frame
-    (a directly co-registered RGB+MS stack; used for standalone QA/benchmarks).
+    ``align="feature"`` (default) uses the SIFT stack anchor (``rig.feature_align_stack``:
+    Green↔RGB-green anchor + MS↔MS) — robust sub-pixel, fixes the bands ECC drops (RedEdge
+    ~58% / Green ~25% of captures). Any band the feature path can't place falls back to ECC,
+    so no capture is unguarded. ``align="ecc"`` uses per-band ECC only (the prior method).
+
+    ``frame="raw"`` (default) writes into the RAW/distorted RGB grid so ODM's own undistort
+    is correct for the carrier — required for the --skip-band-alignment ortho.
+    ``frame="undist"`` writes the undistorted frame (co-registered stack; QA/benchmarks).
     """
     rgb = capture.bands.get("RGB")
     if rgb is None:
         return
-    rgb_gray = rig._read_gray(rgb.path)
-    rh, rw = rgb_gray.shape
+    # green plane drives the feature anchor; also gives RGB size + intrinsics for redistort
+    rgb_green = rig._read_plane(rgb.path, "G")
+    rh, rw = rgb_green.shape
     rgb_intr = rig.parse_dewarp(rgb, (rw, rh))
-    rgbu = rig.undistort(rgb_gray, rgb_intr)
+    rgbu_green = rig.undistort(rgb_green, rgb_intr)
+
+    H_by_band = {}
+    if align == "feature":
+        H_by_band = rig.feature_align_stack(capture.bands, rgbu_green, (rw, rh))
+
+    _rgbu_gray = None  # lazily undistorted grayscale RGB, only if ECC is needed
     for b in config.MS_BANDS:
         ms = capture.bands.get(b)
         if ms is None:
             continue
-        refined_H, qa = rig.refine_alignment(rgb, ms, work_px=work_px, rgbu=rgbu)
+        refined_H, qa = H_by_band.get(b, (None, {}))
+        if refined_H is None:  # ECC (chosen method, or feature-path fallback)
+            if _rgbu_gray is None:
+                _rgbu_gray = rig.undistort(rig._read_gray(rgb.path), rgb_intr)
+            refined_H, ecc_qa = rig.refine_alignment(rgb, ms, work_px=work_px, rgbu=_rgbu_gray)
+            qa = {**ecc_qa, "align": "ecc", **({"fallback_from": "feature"} if align == "feature" else {})}
         ms_raw = cv2.imread(ms.path, cv2.IMREAD_UNCHANGED).astype(np.float32)
         ms_intr = rig.parse_dewarp(ms, (ms_raw.shape[1], ms_raw.shape[0]))
         if frame == "raw":
@@ -94,7 +110,7 @@ def warp_bands(capture, work_px: int = 900, frame: str = "raw"):
 
 
 def prewarp_capture(capture, out_dir: Optional[Path], work_px: int = 900,
-                    write: bool = True) -> dict:
+                    write: bool = True, align: str = "feature") -> dict:
     """Pre-warp all MS bands of one capture into the RGB frame. Returns timings + QA.
 
     ``out_dir=None`` or ``write=False`` runs the full compute but skips file writes
@@ -106,7 +122,7 @@ def prewarp_capture(capture, out_dir: Optional[Path], work_px: int = 900,
 
     t0 = time.time()
     bands = []
-    for b, warped, qa in warp_bands(capture, work_px=work_px):
+    for b, warped, qa in warp_bands(capture, work_px=work_px, align=align):
         tb = time.time()
         out_path = None
         if write and out_dir is not None:
@@ -117,7 +133,9 @@ def prewarp_capture(capture, out_dir: Optional[Path], work_px: int = 900,
         bands.append({
             "band": b,
             "sec": round(time.time() - tb, 3),
-            "refined": qa.get("refined"),
+            "align": qa.get("align"),
+            "anchor_inl": qa.get("anchor_inl"),
+            "msms_inl": qa.get("msms_inl"),
             "ecc_cc": qa.get("ecc_correlation"),
             "coverage": round(float((warped > 0).mean()), 3),
             "out": str(out_path) if out_path else None,
@@ -167,7 +185,7 @@ def _prewarp_one(args) -> int:
     Module-level (picklable) so it runs under a multiprocessing Pool on Windows spawn.
     """
     from . import disguise
-    cap, images_dir, work_px = args
+    cap, images_dir, work_px, align = args
     images_dir = Path(images_dir)
     rgb = cap.bands.get("RGB")
     if rgb is None:
@@ -178,7 +196,7 @@ def _prewarp_one(args) -> int:
         shutil.copy2(rgb.path, dst)               # copy: we edit its XMP
         disguise.inject_bandname(str(dst))        # RGB -> Pan primary
     n += 1
-    for band, warped, _qa in warp_bands(cap, work_px=work_px):
+    for band, warped, _qa in warp_bands(cap, work_px=work_px, align=align):
         out_path = images_dir / cap.bands[band].filename
         if not out_path.exists():
             write_carrier_tif(warped, out_path, rgb.path, band)
@@ -186,15 +204,17 @@ def _prewarp_one(args) -> int:
     return n
 
 
-def prewarp_stage(captures, images_dir, work_px: int = 900, workers: Optional[int] = None) -> int:
+def prewarp_stage(captures, images_dir, work_px: int = 900, workers: Optional[int] = None,
+                  align: str = "feature") -> int:
     """Stage disguised-RGB + prewarped-MS carriers for all captures, in parallel.
 
-    ``workers`` defaults to min(8, cpu_count); pass 1 to force serial. Parallelism is
-    per capture; the per-refine cost is dominated by image I/O + the 20 MP RGB undistort.
+    ``workers`` defaults to min(8, cpu_count); pass 1 to force serial. ``align`` selects
+    the placement method (feature stack anchor, default; or ecc). Parallelism is per
+    capture; per-capture cost is dominated by image I/O + the 20 MP RGB undistort.
     """
     images_dir = Path(images_dir)
     images_dir.mkdir(parents=True, exist_ok=True)
-    args = [(c, str(images_dir), work_px) for c in captures]
+    args = [(c, str(images_dir), work_px, align) for c in captures]
     if workers is None:
         workers = min(8, os.cpu_count() or 1)
     if workers <= 1 or len(args) <= 1:

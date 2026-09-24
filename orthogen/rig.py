@@ -133,6 +133,111 @@ def refine_alignment(rgb: BandImage, ms: BandImage,
     return refined_H, {"refined": True, "ecc_correlation": round(float(cc), 4)}
 
 
+# --------------------------------------------------------------------------- feature align
+def _read_plane(path: str, channel: str = "gray") -> np.ndarray:
+    """Read an image as a normalized float32 plane. For a 3-channel RGB, ``channel`` picks
+    a Bayer plane (G/R/B) or blue-free luminance; MS TIFs are single-band."""
+    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        raise IOError(f"cannot read {path}")
+    if img.ndim == 3:
+        b, g, r = img[:, :, 0], img[:, :, 1], img[:, :, 2]  # OpenCV BGR
+        a = {"R": r, "G": g, "B": b}.get(channel)
+        if a is None:
+            a = cv2.cvtColor(img[:, :, :3], cv2.COLOR_BGR2GRAY)
+    else:
+        a = img
+    a = a.astype(np.float32)
+    lo, hi = np.percentile(a, 1), np.percentile(a, 99)
+    return np.clip((a - lo) / max(hi - lo, 1e-6), 0, 1)
+
+
+def _norm8(a: np.ndarray) -> np.ndarray:
+    lo, hi = np.percentile(a, 1), np.percentile(a, 99)
+    return np.clip((a - lo) / max(hi - lo, 1e-6) * 255, 0, 255).astype(np.uint8)
+
+
+def _clahe8(u8: np.ndarray) -> np.ndarray:
+    return cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(u8)
+
+
+def _match_pts(kp_a, da, kp_b, db, ratio: float = 0.8):
+    """Lowe-ratio BF match of two precomputed SIFT descriptor sets. Returns
+    (query_pts, train_pts) as Nx1x2 float32, or (None, None)."""
+    if da is None or db is None or len(kp_a) < 4 or len(kp_b) < 4:
+        return None, None
+    knn = cv2.BFMatcher(cv2.NORM_L2).knnMatch(da, db, k=2)
+    good = [m for m, n in (p for p in knn if len(p) == 2) if m.distance < ratio * n.distance]
+    if len(good) < 8:
+        return None, None
+    q = np.float32([kp_a[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+    t = np.float32([kp_b[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+    return q, t
+
+
+def feature_align_stack(bands: dict, rgbu_green: np.ndarray, rgb_size: tuple,
+                        min_inliers: int = 25, sift=None) -> dict:
+    """SIFT stack-anchor placement of all MS bands into the RGB frame.
+
+    Anchor Green→RGB once (match the RGB **green channel**, spectrally closest, ~900
+    inliers), register the other bands into Green's grid (MS↔MS, same sensor family),
+    then ``band→RGB = H_green ∘ H_band→green``. Weak bands (NIR) inherit the strong
+    Green anchor instead of matching RGB directly. Far more robust than per-band ECC,
+    which fails on RedEdge ~58% / Green ~25% of captures.
+
+    ``rgbu_green`` = undistorted RGB green plane; ``rgb_size`` = (w, h). Returns
+    ``{band: (refined_H | None, qa)}`` — refined_H maps undistorted-MS → undistorted-RGB,
+    the same convention as ``refine_alignment``; None signals the caller to fall back.
+    """
+    if sift is None:
+        sift = cv2.SIFT_create(nfeatures=4000)
+    green = bands["Green"]
+    g_gray = _read_gray(green.path)
+    gh, gw = g_gray.shape
+    gu = undistort(g_gray, parse_dewarp(green, (gw, gh)))
+    H0g = ms_to_rgb_H(green)
+    kpg, dg = sift.detectAndCompute(_clahe8(_norm8(gu)), None)  # green train desc, reused
+
+    # Green→RGB anchor: RGB (green channel) resampled onto Green's grid, matched to Green
+    rgb_in_g = cv2.warpPerspective(rgbu_green, H0g, (gw, gh),
+                                   flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR)
+    kpa, da = sift.detectAndCompute(_clahe8(_norm8(rgb_in_g)), None)
+    q, t = _match_pts(kpa, da, kpg, dg)
+    Hg, g_inl = None, 0
+    if q is not None:
+        Hg, mask = cv2.findHomography(t, cv2.perspectiveTransform(q, H0g), cv2.USAC_MAGSAC, 3.0)
+        g_inl = int(mask.sum()) if mask is not None else 0
+
+    out = {}
+    for b in ("Green", "Red", "RedEdge", "NIR"):
+        ms = bands.get(b)
+        if ms is None:
+            continue
+        if Hg is None or g_inl < min_inliers:
+            out[b] = (None, {"align": "feature", "anchor_inl": g_inl, "fallback": True})
+            continue
+        if b == "Green":
+            out[b] = (Hg, {"align": "feature", "anchor_inl": g_inl, "msms_inl": g_inl})
+            continue
+        m_gray = _read_gray(ms.path)
+        mh, mw = m_gray.shape
+        mu = undistort(m_gray, parse_dewarp(ms, (mw, mh)))
+        Hbg0 = np.linalg.inv(H0g) @ ms_to_rgb_H(ms)          # band→Green grid (factory)
+        b_in_g = cv2.warpPerspective(mu, Hbg0, (gw, gh), flags=cv2.INTER_LINEAR)
+        kpb, db = sift.detectAndCompute(_clahe8(_norm8(b_in_g)), None)
+        qb, tb = _match_pts(kpb, db, kpg, dg)                 # band-in-Green → Green
+        if qb is None:
+            out[b] = (None, {"align": "feature", "anchor_inl": g_inl, "msms_inl": 0, "fallback": True})
+            continue
+        dH, mb = cv2.findHomography(qb, tb, cv2.USAC_MAGSAC, 3.0)
+        b_inl = int(mb.sum()) if mb is not None else 0
+        if dH is None or b_inl < min_inliers:
+            out[b] = (None, {"align": "feature", "anchor_inl": g_inl, "msms_inl": b_inl, "fallback": True})
+            continue
+        out[b] = (Hg @ dH @ Hbg0, {"align": "feature", "anchor_inl": g_inl, "msms_inl": b_inl})
+    return out
+
+
 def validate_capture(rgb: BandImage, ms: BandImage,
                      undistort_first: bool = True, tile: int = 384,
                      H_override: Optional[np.ndarray] = None) -> dict:

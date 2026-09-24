@@ -73,17 +73,19 @@ def stage_combined(rgb_paths: Iterable[Path], ms_paths: Iterable[Path],
 
 
 def stage_combined_prewarp(captures, project_dir: Path, work_px: int = 900,
-                           workers: Optional[int] = None) -> int:
+                           workers: Optional[int] = None, align: str = "feature") -> int:
     """Stage a disguised-RGB + PRE-WARPED-MS project for --skip-band-alignment.
 
     RGB is copied + disguised as the ``Pan`` primary (drives SfM). Each MS band is
-    ECC-prewarped into the RGB frame and written as a 16-bit carrier TIF that inherits
-    the RGB's XMP (shared CaptureUUID) with its own band name, so ODM groups all five per
-    capture and skips its own (inferior) band alignment. Runs in parallel across captures.
+    pre-warped into the RGB frame (``align``: feature stack anchor, default; or ecc) and
+    written as a 16-bit carrier TIF that inherits the RGB's XMP (shared CaptureUUID) with
+    its own band name, so ODM groups all five per capture and skips its own (inferior)
+    band alignment. Runs in parallel across captures.
     """
     from . import prewarp
     images_dir = project_dir / "images"
-    return prewarp.prewarp_stage(list(captures), images_dir, work_px=work_px, workers=workers)
+    return prewarp.prewarp_stage(list(captures), images_dir, work_px=work_px,
+                                 workers=workers, align=align)
 
 
 def odm_env() -> dict:

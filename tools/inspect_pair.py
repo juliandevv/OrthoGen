@@ -7,12 +7,19 @@ things. Renders an annotated montage PNG and prints a stats table.
 RGB is reduced to a single spectral channel before matching (M3M spectral overlap):
   Green<->RGB G, Red<->RGB R, RedEdge/NIR<->RGB R (blue is never used — no MS overlap).
 
-Runs on the ODM venv Python. Examples:
-  orthogen.bat tools/inspect_pair.py --capture 30 --band NIR --detector all
-  orthogen.bat tools/inspect_pair.py --band RedEdge --enhance all --detector SIFT
-  orthogen.bat tools/inspect_pair.py --capture DJI_...0188 --band Green --rgb-channel G
+Run via tools\inspect.bat (it uses the bundled ODM venv Python). --capture is the filename
+SEQUENCE number (the _0188_ in DJI_..._0188_D.JPG), not a positional index; use --index for
+position, --list to see all. NOTE: orthogen.bat is the OrthoGen CLI, not a script runner —
+use tools\inspect.bat for this tool.
 
-(or:  C:\WebODM\resources\app\apps\ODX\venv\Scripts\python.exe tools/inspect_pair.py ...)
+Examples (PowerShell, from the project root):
+  .\tools\inspect.bat --list
+  .\tools\inspect.bat --capture 0188 --band NIR --detector all
+  .\tools\inspect.bat --band RedEdge --enhance all --detector SIFT
+  .\tools\inspect.bat --index 30 --band Green --rgb-channel G
+
+(or run inspect_pair.py directly with the venv Python:
+   & "C:\WebODM\resources\app\apps\ODX\venv\Scripts\python.exe" tools\inspect_pair.py ...)
 """
 import argparse
 import os
@@ -218,7 +225,12 @@ def fit_to(img, w, h):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--input", default="subset_test")
-    ap.add_argument("--capture", default=None, help="index (int) or filename substring; default=middle")
+    ap.add_argument("--capture", default=None,
+                    help="filename sequence number, e.g. 0188 (the _0188_ in DJI_..._0188_D.JPG), "
+                         "or a filename substring. Default = middle capture.")
+    ap.add_argument("--index", type=int, default=None,
+                    help="alternative to --capture: 0-based position in the sorted complete-capture list")
+    ap.add_argument("--list", action="store_true", help="list available captures (index, seq#, filename) and exit")
     ap.add_argument("--band", default="NIR", choices=["Green", "Red", "RedEdge", "NIR"])
     ap.add_argument("--rgb-channel", default="auto", choices=["auto", "gray", "R", "G", "B", "RG"])
     ap.add_argument("--detector", default="SIFT", help="one of SIFT/AKAZE/ORB/BRISK/KAZE or 'all'")
@@ -229,16 +241,34 @@ def main():
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     from pathlib import Path
+    import re
     ds = Dataset.from_folder(Path(args.input) if os.path.isabs(args.input) else Path(root) / args.input)
     caps = [c for c in ds.captures if not c.missing_bands]
-    if args.capture is None:
-        cap = caps[len(caps)//2]
-    elif args.capture.isdigit():
-        cap = caps[int(args.capture)]
+
+    def seq_of(c):  # the _0188_ token in DJI_<time>_0188_D.JPG
+        m = re.search(r"_(\d{4})_D", c.rgb.filename)
+        return m.group(1) if m else "?"
+
+    if args.list:
+        print(f"{len(caps)} complete captures in {args.input}:")
+        for i, c in enumerate(caps):
+            print(f"  index {i:3d}   seq {seq_of(c)}   {c.rgb.filename}")
+        return
+
+    if args.index is not None:
+        cap = caps[args.index]
+    elif args.capture is None:
+        cap = caps[len(caps) // 2]
     else:
-        cap = next(c for c in caps if args.capture in c.rgb.filename)
+        val = args.capture
+        hits = [c for c in caps if val.isdigit() and seq_of(c) == val.zfill(4)] \
+            or [c for c in caps if val in c.rgb.filename]
+        if not hits:
+            avail = ", ".join(seq_of(c) for c in caps)
+            raise SystemExit(f"no capture matches '{val}'. Use --list, or pick a seq#: {avail}")
+        cap = hits[0]
     ch = BAND_TO_RGBCH[args.band] if args.rgb_channel == "auto" else args.rgb_channel
-    print(f"capture {cap.rgb.filename}  band {args.band}  RGB channel '{ch}'")
+    print(f"capture seq {seq_of(cap)}  ({cap.rgb.filename})  band {args.band}  RGB channel '{ch}'")
 
     # load + undistort
     rgb = cap.rgb
