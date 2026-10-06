@@ -7,10 +7,14 @@ things. Renders an annotated montage PNG and prints a stats table.
 RGB is reduced to a single spectral channel before matching (M3M spectral overlap):
   Green<->RGB G, Red<->RGB R, RedEdge/NIR<->RGB R (blue is never used — no MS overlap).
 
-Run via tools\inspect.bat (it uses the bundled ODM venv Python). --capture is the filename
-SEQUENCE number (the _0188_ in DJI_..._0188_D.JPG), not a positional index; use --index for
-position, --list to see all. NOTE: orthogen.bat is the OrthoGen CLI, not a script runner —
-use tools\inspect.bat for this tool.
+Run via tools/inspect.sh on Linux (runs in the ODM container) or tools\inspect.bat on
+Windows (bundled ODM venv Python). --capture is the filename SEQUENCE number (the _0188_ in
+DJI_..._0188_D.JPG), not a positional index; use --index for position, --list to see all.
+NOTE: orthogen.sh/.bat is the OrthoGen CLI, not a script runner — use the inspect launcher.
+
+Examples (Linux, from the project root):
+  tools/inspect.sh --list
+  tools/inspect.sh --capture 0188 --band NIR --detector all
 
 Examples (PowerShell, from the project root):
   .\tools\inspect.bat --list

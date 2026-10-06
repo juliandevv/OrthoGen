@@ -1,14 +1,15 @@
 """OrthoGen command-line interface.
 
-Run with the bundled ODM venv Python (has the full geo stack + opendm)::
+Run on the ODM engine's Python (has the full geo stack + opendm) via the launcher::
 
-    "C:\\WebODM\\resources\\app\\apps\\ODX\\venv\\Scripts\\python.exe" -m orthogen ingest --input subset_test
+    ./orthogen.sh ingest --input subset_test      (Linux, inside webodm/nodeodx)
+    orthogen.bat ingest --input subset_test       (Windows, WebODM Desktop venv)
 
 Commands:
     ingest    Parse XMP, group captures by UUID, write capture table + validation.
     baseline  Stock ODM run on all 5 bands (control reference).  [--dry-run to preview]
     rgb-sfm   ODM run on RGB only -> poses + dense DSM.           [--dry-run to preview]
-    doctor    Check the bundled engine paths are present.
+    doctor    Check the ODM engine paths + work dir are present.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ import json
 import platform
 import socket
 import sys
+import time
 from pathlib import Path
 
 from . import config, disguise, __version__
@@ -83,12 +85,30 @@ MS_SFM_SETTINGS = {
 COMBINED_SFM_SETTINGS = {
     "primary-band": disguise.NEUTRAL_RGB_BAND,  # the disguised RGB band
     "feature-quality": "medium",              # 1320 px (RGB geometry)
+    "matcher-type": "flann",                   # pinned: Windows (no GPU) auto-picked FLANN;
+                                               # with a GPU + >=32 images, auto picks hamming
     "pc-quality": "low",                       # minimal densify (not the focus)
     "fast-orthophoto": True,                    # skip full 3D mesh
     "orthophoto-resolution": 1.3,             # cm/px (RGB native)
     "gps-accuracy": 0.1,                        # m (RTK)
     "auto-boundary": True,
     "cog": True,
+}
+
+# --full: the combined run WITHOUT fast-orthophoto (applied on top of
+# COMBINED_SFM_SETTINGS). ODM builds a dense cloud (OpenMVS, GPU) -> 2.5D mesh ->
+# ortho, instead of a mesh from the sparse SfM points, so relief is modelled far
+# better. The 3D textured model is skipped (the ortho uses the 2.5D mesh). Also: the
+# GPU matcher, a DSM for later own-orthorectification, and gps-accuracy at RTK
+# precision (0.1 relaxed georef to ~0.11 m in combined_prewarp_60; RTK is ~1-2 cm).
+COMBINED_FULL_OVERRIDES = {
+    "fast-orthophoto": None,                   # off -> dense point cloud
+    "pc-quality": "high",                      # dense cloud from half-res depth maps
+    "dsm": True,
+    "dem-resolution": 1.3,                     # cm/px (RGB native)
+    "skip-3dmodel": True,                      # ortho uses the 2.5D mesh
+    "matcher-type": "hamming",                 # GPU matcher
+    "gps-accuracy": 0.02,                      # m (RTK precision)
 }
 
 # Key ODM artifacts to record for verification.
@@ -121,7 +141,8 @@ def cmd_doctor(_args):
         for p in problems:
             print("  -", p)
         return 1
-    print("Bundled ODM engine: OK")
+    print("WORK_DIR:", config.WORK_DIR)
+    print(f"ODM engine {config.engine_version()}: OK")
     return 0
 
 
@@ -160,6 +181,17 @@ def _summarize_outputs(project_dir: Path) -> dict:
     return out
 
 
+def _read_benchmark(path: Path) -> dict:
+    """Per-stage runtimes from ODM's benchmark.txt ("<stage> runtime: <s> seconds")."""
+    out = {}
+    if path.exists():
+        for line in path.read_text().splitlines():
+            stage, _, rest = line.partition(" runtime: ")
+            if rest:
+                out[stage] = round(float(rest.split()[0]), 1)
+    return out
+
+
 def _run_project(name: str, folder: Path, bands: list, settings: dict,
                  dry_run: bool, stager=None) -> int:
     """Shared run path: stage images, write a manifest, run ODM (logged), summarize.
@@ -174,12 +206,16 @@ def _run_project(name: str, folder: Path, bands: list, settings: dict,
     project_dir.mkdir(parents=True, exist_ok=True)
 
     staged = 0
+    staging_seconds = 0.0
     if not dry_run:
+        t_stage = time.time()
         if stager is not None:
             staged = stager(ds, project_dir)
         else:
             staged = odm_runner.stage_images(_band_images(ds, bands), project_dir)
-        print(f"Staged {staged} images ({'+'.join(bands)}) into {project_dir/'images'}")
+        staging_seconds = time.time() - t_stage
+        print(f"Staged {staged} images ({'+'.join(bands)}) into {project_dir/'images'} "
+              f"in {staging_seconds/60:.1f} min")
 
     started = _dt.datetime.now().astimezone().isoformat()
     manifest = {
@@ -188,12 +224,13 @@ def _run_project(name: str, folder: Path, bands: list, settings: dict,
         "started": started,
         "host": socket.gethostname(),
         "platform": platform.platform(),
-        "odm_engine": {"path": str(config.ODX_HOME), "version": "3.8.3"},
+        "odm_engine": {"path": str(config.ODX_HOME), "version": config.engine_version()},
         "input_folder": str(folder),
         "bands": bands,
         "captures_total": len(ds.captures),
         "captures_complete": len(complete),
         "images_staged": staged,
+        "staging_seconds": round(staging_seconds, 1),
         "settings": settings,
         "command": odm_runner.build_command(name, project_parent, settings),
     }
@@ -214,6 +251,7 @@ def _run_project(name: str, folder: Path, bands: list, settings: dict,
     manifest["elapsed_seconds"] = round(elapsed, 1)
     manifest["console_log"] = str(log_path)
     manifest["outputs"] = _summarize_outputs(project_dir)
+    manifest["odm_stage_seconds"] = _read_benchmark(project_dir / "benchmark.txt")
     manifest_path.write_text(json.dumps(manifest, indent=2))
 
     print(f"\n{'='*60}\nODM exit={code}  elapsed={elapsed/60:.1f} min")
@@ -267,6 +305,9 @@ def cmd_combined_sfm(args):
     ODM aligns MS to RGB and orthorectifies onto the RGB DSM."""
     folder = _resolve(args.input)
     settings = dict(COMBINED_SFM_SETTINGS)
+    if args.full:
+        settings.update(COMBINED_FULL_OVERRIDES)
+        settings = {k: v for k, v in settings.items() if v is not None}
     if args.feature_quality:
         settings["feature-quality"] = args.feature_quality
     if args.pc_quality:
@@ -306,7 +347,7 @@ def build_parser() -> argparse.ArgumentParser:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    d = sub.add_parser("doctor", help="check bundled engine paths")
+    d = sub.add_parser("doctor", help="check ODM engine paths + work dir")
     d.set_defaults(func=cmd_doctor)
 
     i = sub.add_parser("ingest", help="parse XMP + group captures")
@@ -354,6 +395,9 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--name", default="combined_rgb_primary")
     c.add_argument("--limit", type=int, default=None,
                    help="use only the first N complete captures (quick preliminary runs)")
+    c.add_argument("--full", action="store_true",
+                   help="full pipeline: no fast-orthophoto (dense cloud -> 2.5D mesh), DSM, "
+                        "pc-quality high, GPU matcher, gps-accuracy 0.02 (COMBINED_FULL_OVERRIDES)")
     c.add_argument("--feature-quality", default=None)
     c.add_argument("--pc-quality", default=None)
     c.add_argument("--skip-band-alignment", action="store_true",
@@ -361,9 +405,9 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--prewarp", action="store_true",
                    help="prewarp MS into the RGB frame (rig.py) and feed as carriers; "
                         "implies --skip-band-alignment")
-    c.add_argument("--align", choices=["feature", "ecc"], default="feature",
-                   help="--prewarp placement: 'feature' SIFT stack anchor (default, robust "
-                        "sub-px, ECC fallback) or 'ecc' per-band ECC (prior method)")
+    c.add_argument("--align", choices=["feature", "ecc"], default="ecc",
+                   help="--prewarp placement: 'ecc' per-band ECC (default; best on the ODM "
+                        "ortho) or 'feature' SIFT stack anchor (robust per capture, ECC fallback)")
     c.add_argument("--work-px", type=int, default=900,
                    help="ECC working resolution for --prewarp --align ecc (default 900)")
     c.add_argument("--prewarp-workers", type=int, default=None,

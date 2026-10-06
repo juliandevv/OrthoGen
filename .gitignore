@@ -3,6 +3,8 @@
 /subset_test/
 # any other DJI capture folder dropped in the project root
 /DJI_*/
+# dataset archives
+*.zip
 # raw imagery anywhere in the tree
 *.JPG
 *.jpg
@@ -15,7 +17,8 @@
 captures.csv
 captures.json
 
-# --- ODM run products (WORK_DIR is off-tree, but just in case) ---
+# --- Work directory: ODM projects + large intermediaries (config.WORK_DIR) ---
+/work/
 *.log
 
 # --- Python ---

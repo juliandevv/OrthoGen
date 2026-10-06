@@ -1,7 +1,8 @@
-"""Thin wrapper around the bundled ODM 3.7.4 engine CLI.
+"""Thin wrapper around the ODM engine CLI (``run.py``).
 
-Runs the Dockerless native engine directly via ``winrun.bat`` (which sets up
-GDAL/PROJ/OpenSfM env then calls ``run.py``). ODM's project convention is::
+Runs the engine directly on its own Python: inside the ``webodm/nodeodx``
+container on Linux (env comes from the image), or the native WebODM Desktop
+venv on Windows (env replicated from ``win32env.bat``). ODM's project convention is::
 
     <project_parent>/<name>/images/*.{jpg,tif}   -> inputs
     <project_parent>/<name>/                      -> outputs (odm_orthophoto, dsm, opensfm, ...)
@@ -73,11 +74,11 @@ def stage_combined(rgb_paths: Iterable[Path], ms_paths: Iterable[Path],
 
 
 def stage_combined_prewarp(captures, project_dir: Path, work_px: int = 900,
-                           workers: Optional[int] = None, align: str = "feature") -> int:
+                           workers: Optional[int] = None, align: str = "ecc") -> int:
     """Stage a disguised-RGB + PRE-WARPED-MS project for --skip-band-alignment.
 
     RGB is copied + disguised as the ``Pan`` primary (drives SfM). Each MS band is
-    pre-warped into the RGB frame (``align``: feature stack anchor, default; or ecc) and
+    pre-warped into the RGB frame (``align``: per-band ECC, default; or feature stack anchor) and
     written as a 16-bit carrier TIF that inherits the RGB's XMP (shared CaptureUUID) with
     its own band name, so ODM groups all five per capture and skips its own (inferior)
     band alignment. Runs in parallel across captures.
@@ -89,12 +90,21 @@ def stage_combined_prewarp(captures, project_dir: Path, work_px: int = 900,
 
 
 def odm_env() -> dict:
-    """Replicate win32env.bat: GDAL/PROJ/PDAL env for the bundled engine.
+    """Environment for an ODM subprocess.
+
+    Linux (container): the image already sets PYTHONPATH (opendm/OpenSfM),
+    LD_LIBRARY_PATH and PDAL_DRIVER_PATH, so pass it through unchanged.
+
+    Windows: replicate win32env.bat (GDAL/PROJ/PDAL env for the bundled engine).
 
     We invoke run.py directly rather than winrun.bat because the vendor batch
     resolves ``%~dp0`` / ``call win32env.bat`` incorrectly when launched as a
     subprocess. run.py is all winrun.bat ultimately runs.
     """
+    if not config.IS_WINDOWS:
+        env = dict(os.environ)
+        env["ODM_NONINTERACTIVE"] = "1"
+        return env
     odx = config.ODX_HOME
     venv = odx / "venv"
     venv_scripts = venv / "Scripts"
@@ -121,12 +131,12 @@ def odm_env() -> dict:
 
 def build_command(name: str, project_parent: Path, options: Optional[dict] = None,
                   rerun_from: Optional[str] = None) -> list[str]:
-    """Construct the ODM run argv (venv python + run.py, invoked directly).
+    """Construct the ODM run argv (engine python + run.py, invoked directly).
 
     ``options`` maps ODM flags (without leading --) to values; boolean True
     renders a bare flag. Example: {"orthophoto-resolution": 2, "dsm": True}.
     """
-    argv = [str(config.ODX_VENV_PYTHON), "-X", "utf8", str(config.ODX_RUN_PY),
+    argv = [str(config.ODX_PYTHON), "-X", "utf8", str(config.ODX_RUN_PY),
             name, "--project-path", str(project_parent)]
     if rerun_from:
         argv += ["--rerun-from", rerun_from]

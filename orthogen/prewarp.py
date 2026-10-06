@@ -61,14 +61,16 @@ def _redistort_map(refined_H, rgb_intr, ms_intr, rw, rh, step: int = 8):
     return mapx, mapy
 
 
-def warp_bands(capture, work_px: int = 900, frame: str = "raw", align: str = "feature"):
+def warp_bands(capture, work_px: int = 900, frame: str = "raw", align: str = "ecc"):
     """Yield ``(band, warped_uint16, qa)`` for each MS band of a capture, placed into
     the RGB frame. The 20 MP RGB is read + undistorted ONCE and reused.
 
-    ``align="feature"`` (default) uses the SIFT stack anchor (``rig.feature_align_stack``:
-    Green↔RGB-green anchor + MS↔MS) — robust sub-pixel, fixes the bands ECC drops (RedEdge
-    ~58% / Green ~25% of captures). Any band the feature path can't place falls back to ECC,
-    so no capture is unguarded. ``align="ecc"`` uses per-band ECC only (the prior method).
+    ``align="ecc"`` (default) uses per-band ECC warm-started from the factory DewarpHMatrix —
+    marginally better on the ODM ortho (60-cap test: ~5.7 cm median, tighter p90, 10x less
+    between-capture scale jitter; see RESULTS.md). ``align="feature"`` uses the SIFT stack
+    anchor (``rig.feature_align_stack``: Green↔RGB-green anchor + MS↔MS) — more robust
+    per capture (fixes the bands ECC drops: RedEdge ~58% / Green ~25% of captures), with
+    ECC fallback for any band it can't place.
 
     ``frame="raw"`` (default) writes into the RAW/distorted RGB grid so ODM's own undistort
     is correct for the carrier — required for the --skip-band-alignment ortho.
@@ -110,7 +112,7 @@ def warp_bands(capture, work_px: int = 900, frame: str = "raw", align: str = "fe
 
 
 def prewarp_capture(capture, out_dir: Optional[Path], work_px: int = 900,
-                    write: bool = True, align: str = "feature") -> dict:
+                    write: bool = True, align: str = "ecc") -> dict:
     """Pre-warp all MS bands of one capture into the RGB frame. Returns timings + QA.
 
     ``out_dir=None`` or ``write=False`` runs the full compute but skips file writes
@@ -205,11 +207,11 @@ def _prewarp_one(args) -> int:
 
 
 def prewarp_stage(captures, images_dir, work_px: int = 900, workers: Optional[int] = None,
-                  align: str = "feature") -> int:
+                  align: str = "ecc") -> int:
     """Stage disguised-RGB + prewarped-MS carriers for all captures, in parallel.
 
     ``workers`` defaults to min(8, cpu_count); pass 1 to force serial. ``align`` selects
-    the placement method (feature stack anchor, default; or ecc). Parallelism is per
+    the placement method (ecc, default; or feature stack anchor). Parallelism is per
     capture; per-capture cost is dominated by image I/O + the 20 MP RGB undistort.
     """
     images_dir = Path(images_dir)

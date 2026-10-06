@@ -300,3 +300,63 @@ it we'd need our OWN per-capture orthorectification (bypass ODM's blend), or con
 feature fit to fewer DOF (affine/similarity, regularized toward factory H) to cut the
 between-capture variance. For the ODM ortho path, **ECC prewarp remains marginally better +
 cheaper** — keep it the default; `--align feature` stays available for robustness.
+
+---
+
+## Linux port — 60-cap ECC prewarp re-run (2026-10-06)
+
+Machine: Ubuntu 26.04, 32 cores, 29 GB RAM, RTX 5070 Ti 16 GB. Engine: **ODX 3.8.4** in the
+`webodm/nodeodx:gpu` container (`./orthogen.sh`). Both runs `combined-sfm --prewarp --align ecc`
+on all 60 captures, 8 prewarp workers. **A** = straight recreation of `combined_prewarp_60`
+(same settings, fast-orthophoto, matcher pinned to FLANN as Windows auto-picked without a GPU).
+**B** = `--full`: no fast-orthophoto (OpenMVS dense cloud → 2.5D mesh → ortho), pc-quality high,
+DSM at 1.3 cm, skip-3dmodel, **GPU hamming matcher**, **gps-accuracy 0.02**.
+
+| Run | Staging | ODM | Total | Recon | Sparse pts | Reproj (norm) | Georef avg / CE90 |
+|---|---|---|---|---|---|---|---|
+| Windows `combined_prewarp_60` (3.8.3, 16 cores, CPU) | 10.3 min | 25.0 min | ~35 min | 60/60, 1 comp | — | 0.109 | 0.111 m / — |
+| **A** `combined_prewarp_60_linux` | **1.5 min** | **4.8 min** | **6.3 min** | 60/60, 1 comp | 10,749 | 0.111 | 0.126 m / 0.146 m |
+| **B** `combined_prewarp_60_full` | **1.5 min** | **7.1 min** | **8.6 min** | 60/60, 1 comp | 14,154 | 0.109 | 0.0025 m / 0.0022 m |
+
+**ODM stage times (s)** — from each run's `benchmark.txt` (also in `orthogen_run.json`):
+
+| Stage | A | B |
+|---|---|---|
+| opensfm | 69 | 71 (GPU hamming matching) |
+| openmvs (dense) | — | 56 |
+| odm_filterpoints | 0 | 8 |
+| odm_meshing | 17 | 33 |
+| mvs_texturing | 146 | 163 |
+| odm_georeferencing | 0 | 9 |
+| odm_dem | 0 | 25 |
+| odm_orthophoto | 50 | 40 |
+| odm_report | 1 | 10 |
+
+**Resources** — `tools/sample_resources.sh`, 5 s `docker stats` + `nvidia-smi` samples
+(`work/<run>/resources.csv`). Memory is container usage minus inactive page cache, so treat
+it as an upper bound on RSS.
+
+| Run / phase | Peak mem | Mean CPU | Peak GPU mem / util |
+|---|---|---|---|
+| A staging | 7.3 GiB | 13.0 cores | idle |
+| A ODM | 12.2 GiB | 7.0 cores | idle (FLANN, no dense) |
+| B staging | 14.8 GiB | 11.9 cores | idle |
+| B ODM | 17.1 GiB | 4.6 cores | 0.9 GiB / 75 % |
+
+Disk: A 23 GB, B 27 GB (ortho 2.2 / 2.5 GB, B's DSM 0.2 GB at 1.3 cm, LAZ 73 MB).
+
+**Notes.**
+- **Port verified:** A reproduces the Windows geometry (60/60, 1 component, reproj 0.111 vs
+  0.109, georef 0.126 vs 0.111 m) at ~5.5× less wall time. The 3.8.3→3.8.4 change shows no
+  meaningful SfM difference at these settings.
+- **Staging 10.3 → 1.5 min** with the same 8 workers, so the Windows "under-scaling" was largely
+  platform/disk-bound (spawn + NTFS/OneDrive I/O), not only thread oversubscription.
+- **Full pipeline costs only +2.3 min** (dense OpenMVS on GPU + DEM). Texturing still dominates
+  both runs (~2.5 min, CPU).
+- **B's georef 2.5 mm is the GPS prior, not accuracy.** With `gps-accuracy 0.02` the bundle pins
+  cameras to their RTK positions harder; reproj is unchanged (0.109), so geometry isn't strained,
+  but the residual is now below RTK precision (~1–2 cm) and measures the prior (cf. the
+  run #1/#3 caveat above). Independent check needs GCPs/checkpoints.
+- **Band co-registration not yet measured** — `measure_align.py` was not carried over from
+  Windows; to be rewritten (`tools/measure_align.py`) and run on both orthos to see whether
+  B's dense 2.5D surface lowers the ~5.7 cm floor.

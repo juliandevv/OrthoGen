@@ -11,10 +11,11 @@ regardless of ortho size, and no whole-raster array is ever held. Output is a TI
 DEFLATE-compressed BigTIFF.
 
 RUN IN QGIS (Python Console):
-    Edit the CONFIG block below, then: exec(open(r"...\tools\downsample_ms_ortho.py").read())
+    Edit the CONFIG block below, then: exec(open(".../tools/downsample_ms_ortho.py").read())
 
-RUN FROM A SHELL (QGIS/OSGeo4W python, or the ODM venv python):
-    python tools\downsample_ms_ortho.py INPUT.tif OUTPUT.tif [--ms 1,2,3,4] [--native-cm 2.6]
+RUN FROM A SHELL (in the ODM container, paths relative to the project root):
+    tools/container.sh tools/downsample_ms_ortho.py INPUT.tif OUTPUT.tif [--ms 1,2,3,4] [--native-cm 2.6]
+  (or any python with GDAL, e.g. QGIS/OSGeo4W: python tools/downsample_ms_ortho.py ...)
 """
 import os
 import sys
@@ -26,8 +27,8 @@ from osgeo import gdal
 
 # ----------------------------------------------------------------- CONFIG (edit for QGIS)
 CONFIG = {
-    "input":       r"C:\Users\devrj\OrthoGen_work\combined_prewarp_60\odm_orthophoto\odm_orthophoto.tif",
-    "output":      r"C:\Users\devrj\OrthoGen_work\combined_prewarp_60\odm_orthophoto\odm_orthophoto_msnative.tif",
+    "input":       "/home/Julian/Projects/OrthoGen/work/combined_prewarp_60/odm_orthophoto/odm_orthophoto.tif",
+    "output":      "/home/Julian/Projects/OrthoGen/work/combined_prewarp_60/odm_orthophoto/odm_orthophoto_msnative.tif",
     "ms_bands":    [1, 2, 3, 4],   # 1-based band indices to downsample (Red, Green, NIR, RedEdge)
     "native_cm":   2.6,            # MS native GSD; factor = round(native_cm / ortho_cm)
     "factor":      None,           # override the auto factor (int) if you prefer; else None
